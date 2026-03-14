@@ -1,25 +1,30 @@
 package attendance.ayush
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
 import android.graphics.Color
+import android.net.Uri
 import android.os.Bundle
 import android.util.Log
 import android.view.View
 import android.widget.*
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.app.AppCompatDelegate
 import androidx.camera.core.*
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.lifecycle.lifecycleScope
 import attendance.ayush.databinding.ActivityMainBinding
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.FileWriter
 import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.ExecutorService
@@ -77,6 +82,23 @@ class MainActivity : AppCompatActivity() {
         binding.btnAddTeacher.setOnClickListener {
             showAdminVerificationDialog()
         }
+
+        binding.btnExtractCsv.setOnClickListener {
+            extractAttendanceCsv()
+        }
+
+        binding.btnToggleTheme.setOnClickListener {
+            toggleTheme()
+        }
+    }
+
+    private fun toggleTheme() {
+        val currentMode = AppCompatDelegate.getDefaultNightMode()
+        if (currentMode == AppCompatDelegate.MODE_NIGHT_YES) {
+            AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_NO)
+        } else {
+            AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_YES)
+        }
     }
 
     private fun setupProfileSpinner() {
@@ -95,10 +117,13 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateUIForSelectedTeacher() {
         val teacher = currentTeacher ?: return
-        binding.btnAddTeacher.visibility = if (teacher.isPrincipal) View.VISIBLE else View.GONE
+        
+        // Manager gets all admin permissions
+        binding.btnAddTeacher.visibility = if (teacher.isManager) View.VISIBLE else View.GONE
+        binding.btnExtractCsv.visibility = if (teacher.isManager) View.VISIBLE else View.GONE
+        
         binding.cameraOverlay.visibility = View.GONE
         
-        // Reset status to avoid showing previous teacher's data while loading
         binding.statusIn.text = "In: --"
         binding.statusOut.text = "Out: --"
         binding.btnCheckIn.isEnabled = false
@@ -108,13 +133,34 @@ class MainActivity : AppCompatActivity() {
             val today = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
             val record = db.attendanceDao().getRecordForTeacherOnDate(teacher.id, today)
             
-            // Verify selection hasn't changed during fetch
             if (currentTeacher?.id == teacher.id) {
                 binding.statusIn.text = "In: ${record?.inTime ?: "--"}"
                 binding.statusOut.text = "Out: ${record?.outTime ?: "--"}"
                 
                 binding.btnCheckIn.isEnabled = record?.inTime == null
                 binding.btnCheckOut.isEnabled = record?.inTime != null && record.outTime == null
+            }
+        }
+        updateAttendanceCount()
+    }
+
+    private fun updateAttendanceCount() {
+        val teacher = currentTeacher ?: return
+        lifecycleScope.launch {
+            // Get current month info
+            val calendar = Calendar.getInstance()
+            val daysInMonth = calendar.getActualMaximum(Calendar.DAY_OF_MONTH)
+            val currentMonthPrefix = SimpleDateFormat("yyyy-MM", Locale.getDefault()).format(Date())
+            
+            // Fetch all records for this teacher
+            val allRecords = db.attendanceDao().getAllRecordsForTeacher(teacher.id)
+            // Filter by current month and ensure they actually checked in
+            val presentDaysInMonth = allRecords.count { 
+                it.date.startsWith(currentMonthPrefix) && it.inTime != null 
+            }
+            
+            withContext(Dispatchers.Main) {
+                binding.tvPresentCount.text = "$presentDaysInMonth/$daysInMonth"
             }
         }
     }
@@ -129,7 +175,8 @@ class MainActivity : AppCompatActivity() {
     private fun showRecordForDate(date: String) {
         val current = currentTeacher ?: return
         lifecycleScope.launch {
-            if (current.isPrincipal) {
+            // Manager can see everyone's report
+            if (current.isManager) {
                 val records = db.attendanceDao().getAllRecordsOnDate(date)
                 showPrincipalReport(date, records)
             } else {
@@ -140,11 +187,15 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showTeacherRecordDialog(teacher: Teacher, date: String, record: AttendanceRecord?) {
+        val isDarkMode = AppCompatDelegate.getDefaultNightMode() == AppCompatDelegate.MODE_NIGHT_YES
+        val bgColor = if (isDarkMode) Color.parseColor("#121212") else Color.WHITE
+        val textColor = if (isDarkMode) Color.WHITE else Color.BLACK
+
         val scroll = ScrollView(this)
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(40, 20, 40, 20)
-            setBackgroundColor(Color.WHITE)
+            setBackgroundColor(bgColor)
         }
         scroll.addView(layout)
 
@@ -152,7 +203,7 @@ class MainActivity : AppCompatActivity() {
             layout.addView(TextView(this).apply { 
                 text = "Check-In: ${record.inTime}"
                 textSize = 18f
-                setTextColor(Color.BLACK)
+                setTextColor(textColor)
             })
             record.inPhotoPath?.let { path ->
                 val img = ImageView(this)
@@ -165,7 +216,7 @@ class MainActivity : AppCompatActivity() {
                 text = "\nCheck-Out: ${record.outTime ?: "N/A"}"
                 textSize = 18f
                 setPadding(0, 20, 0, 0)
-                setTextColor(Color.BLACK)
+                setTextColor(textColor)
             })
             record.outPhotoPath?.let { path ->
                 val img = ImageView(this)
@@ -176,7 +227,7 @@ class MainActivity : AppCompatActivity() {
         } else {
             layout.addView(TextView(this).apply { 
                 text = "No records found."
-                setTextColor(Color.BLACK)
+                setTextColor(textColor)
             })
         }
 
@@ -188,18 +239,22 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showPrincipalReport(date: String, records: List<AttendanceRecord>) {
+        val isDarkMode = AppCompatDelegate.getDefaultNightMode() == AppCompatDelegate.MODE_NIGHT_YES
+        val bgColor = if (isDarkMode) Color.parseColor("#121212") else Color.WHITE
+        val textColor = if (isDarkMode) Color.WHITE else Color.BLACK
+
         val scroll = ScrollView(this)
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(30, 20, 30, 20)
-            setBackgroundColor(Color.WHITE)
+            setBackgroundColor(bgColor)
         }
         scroll.addView(container)
 
         if (records.isEmpty()) {
             container.addView(TextView(this).apply { 
                 text = "No attendance marked for today."
-                setTextColor(Color.BLACK)
+                setTextColor(textColor)
             })
         } else {
             records.forEach { record ->
@@ -210,9 +265,9 @@ class MainActivity : AppCompatActivity() {
                     background = ContextCompat.getDrawable(context, android.R.drawable.dialog_holo_light_frame)
                 }
                 card.addView(TextView(this).apply { 
-                    text = "${teacher?.name ?: "Unknown (ID: ${record.teacherId})"}\nIn: ${record.inTime} | Out: ${record.outTime ?: "--"}"
+                    text = "${teacher?.name ?: "Unknown"}\nIn: ${record.inTime} | Out: ${record.outTime ?: "--"}"
                     setTypeface(null, android.graphics.Typeface.BOLD)
-                    setTextColor(Color.BLACK)
+                    setTextColor(textColor)
                 })
 
                 val photoLayout = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
@@ -237,10 +292,55 @@ class MainActivity : AppCompatActivity() {
         }
 
         AlertDialog.Builder(this)
-            .setTitle("All Attendance - $date")
+            .setTitle("Daily Report - $date")
             .setView(scroll)
             .setPositiveButton("Close", null)
             .show()
+    }
+
+    private fun extractAttendanceCsv() {
+        lifecycleScope.launch {
+            val today = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
+            val records = db.attendanceDao().getAllRecordsOnDate(today)
+            
+            if (records.isEmpty()) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(this@MainActivity, "No records to extract for today.", Toast.LENGTH_SHORT).show()
+                }
+                return@launch
+            }
+
+            val csvFile = File(getExternalFilesDir(null), "Attendance_$today.csv")
+            try {
+                val writer = FileWriter(csvFile)
+                writer.append("Teacher Name,Date,Check-In,Check-Out\n")
+                records.forEach { record ->
+                    val teacher = TeacherRepository.getTeacherById(record.teacherId)
+                    writer.append("${teacher?.name ?: "Unknown"},${record.date},${record.inTime},${record.outTime ?: "--"}\n")
+                }
+                writer.flush()
+                writer.close()
+
+                withContext(Dispatchers.Main) {
+                    shareCsvFile(csvFile)
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(this@MainActivity, "Failed to extract CSV", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
+    private fun shareCsvFile(file: File) {
+        val uri = FileProvider.getUriForFile(this, "${applicationContext.packageName}.provider", file)
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/csv"
+            putExtra(Intent.EXTRA_SUBJECT, "Attendance Report")
+            putExtra(Intent.EXTRA_STREAM, uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        startActivity(Intent.createChooser(intent, "Share CSV"))
     }
 
     private fun prepareAttendance(isCheckIn: Boolean) {
@@ -282,10 +382,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showPinDialog(teacher: Teacher) {
+        val isDarkMode = AppCompatDelegate.getDefaultNightMode() == AppCompatDelegate.MODE_NIGHT_YES
+        val textColor = if (isDarkMode) Color.WHITE else Color.BLACK
+        val hintColor = if (isDarkMode) Color.LTGRAY else Color.GRAY
+
         val input = EditText(this).apply {
             hint = "Enter PIN"
-            setTextColor(Color.BLACK)
-            setHintTextColor(Color.GRAY)
+            setTextColor(textColor)
+            setHintTextColor(hintColor)
             inputType = android.text.InputType.TYPE_CLASS_NUMBER or android.text.InputType.TYPE_NUMBER_VARIATION_PASSWORD
         }
         AlertDialog.Builder(this)
@@ -294,9 +398,8 @@ class MainActivity : AppCompatActivity() {
             .setView(input)
             .setPositiveButton("Capture & Save") { _, _ ->
                 val pin = input.text.toString()
-                val principal = TeacherRepository.teachers.find { it.isPrincipal }
-                // Master PIN logic or User's own PIN
-                if (pin == teacher.pin || pin == principal?.pin) {
+                val manager = TeacherRepository.teachers.find { it.isManager }
+                if (pin == teacher.pin || pin == manager?.pin) {
                     capturePhoto(teacher)
                 } else {
                     Toast.makeText(this, "Incorrect PIN!", Toast.LENGTH_SHORT).show()
@@ -308,13 +411,13 @@ class MainActivity : AppCompatActivity() {
 
     private fun showChangePinSelectionDialog() {
         val teacher = currentTeacher ?: return
-        if (teacher.isPrincipal) {
+        if (teacher.isManager) {
             val teacherNames = TeacherRepository.teachers.map { it.name }.toTypedArray()
             AlertDialog.Builder(this)
                 .setTitle("Select Profile to Change PIN")
                 .setItems(teacherNames) { _, which ->
                     val selectedTeacher = TeacherRepository.teachers[which]
-                    if (selectedTeacher.isPrincipal || selectedTeacher.id == teacher.id) {
+                    if (selectedTeacher.isManager || selectedTeacher.id == teacher.id) {
                         showTeacherChangePinDialog(selectedTeacher)
                     } else {
                         showAdminResetPinDialog(selectedTeacher)
@@ -327,7 +430,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showTeacherChangePinDialog(teacher: Teacher) {
-        // Restriction: Once a month
         val lastChange = teacher.lastPinChangeDate ?: 0L
         val calendar = Calendar.getInstance()
         calendar.timeInMillis = lastChange
@@ -340,21 +442,26 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
+        val isDarkMode = AppCompatDelegate.getDefaultNightMode() == AppCompatDelegate.MODE_NIGHT_YES
+        val bgColor = if (isDarkMode) Color.parseColor("#121212") else Color.WHITE
+        val textColor = if (isDarkMode) Color.WHITE else Color.BLACK
+        val hintColor = if (isDarkMode) Color.LTGRAY else Color.GRAY
+
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(50, 40, 50, 10)
-            setBackgroundColor(Color.WHITE)
+            setBackgroundColor(bgColor)
         }
         val oldPinInput = EditText(this).apply { 
             hint = "Current PIN"
-            setTextColor(Color.BLACK)
-            setHintTextColor(Color.GRAY)
+            setTextColor(textColor)
+            setHintTextColor(hintColor)
             inputType = android.text.InputType.TYPE_CLASS_NUMBER or android.text.InputType.TYPE_NUMBER_VARIATION_PASSWORD 
         }
         val newPinInput = EditText(this).apply { 
             hint = "New 4-digit PIN"
-            setTextColor(Color.BLACK)
-            setHintTextColor(Color.GRAY)
+            setTextColor(textColor)
+            setHintTextColor(hintColor)
             inputType = android.text.InputType.TYPE_CLASS_NUMBER or android.text.InputType.TYPE_NUMBER_VARIATION_PASSWORD 
         }
         
@@ -383,10 +490,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showAdminResetPinDialog(teacher: Teacher) {
+        val isDarkMode = AppCompatDelegate.getDefaultNightMode() == AppCompatDelegate.MODE_NIGHT_YES
+        val textColor = if (isDarkMode) Color.WHITE else Color.BLACK
+        val hintColor = if (isDarkMode) Color.LTGRAY else Color.GRAY
+
         val input = EditText(this).apply {
             hint = "New PIN for ${teacher.name}"
-            setTextColor(Color.BLACK)
-            setHintTextColor(Color.GRAY)
+            setTextColor(textColor)
+            setHintTextColor(hintColor)
             inputType = android.text.InputType.TYPE_CLASS_NUMBER or android.text.InputType.TYPE_NUMBER_VARIATION_PASSWORD
         }
         AlertDialog.Builder(this)
@@ -465,19 +576,23 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showAdminVerificationDialog() {
+        val isDarkMode = AppCompatDelegate.getDefaultNightMode() == AppCompatDelegate.MODE_NIGHT_YES
+        val textColor = if (isDarkMode) Color.WHITE else Color.BLACK
+        val hintColor = if (isDarkMode) Color.LTGRAY else Color.GRAY
+
         val input = EditText(this).apply {
-            hint = "Principal PIN"
-            setTextColor(Color.BLACK)
-            setHintTextColor(Color.GRAY)
+            hint = "Manager PIN"
+            setTextColor(textColor)
+            setHintTextColor(hintColor)
             inputType = android.text.InputType.TYPE_CLASS_NUMBER or android.text.InputType.TYPE_NUMBER_VARIATION_PASSWORD
         }
         AlertDialog.Builder(this)
             .setTitle("Admin Access")
-            .setMessage("Verify Principal Omprakash's PIN to add teachers.")
+            .setMessage("Verify Manager's PIN to add teachers.")
             .setView(input)
             .setPositiveButton("Verify") { _, _ ->
-                val principal = TeacherRepository.teachers.find { it.isPrincipal }
-                if (input.text.toString() == principal?.pin) {
+                val manager = TeacherRepository.teachers.find { it.isManager }
+                if (input.text.toString() == manager?.pin) {
                     showAddTeacherDialog()
                 } else {
                     Toast.makeText(this, "Invalid Admin PIN!", Toast.LENGTH_SHORT).show()
@@ -488,20 +603,25 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showAddTeacherDialog() {
+        val isDarkMode = AppCompatDelegate.getDefaultNightMode() == AppCompatDelegate.MODE_NIGHT_YES
+        val bgColor = if (isDarkMode) Color.parseColor("#121212") else Color.WHITE
+        val textColor = if (isDarkMode) Color.WHITE else Color.BLACK
+        val hintColor = if (isDarkMode) Color.LTGRAY else Color.GRAY
+
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(50, 40, 50, 10)
-            setBackgroundColor(Color.WHITE)
+            setBackgroundColor(bgColor)
         }
         val nameInput = EditText(this).apply { 
             hint = "Full Name"
-            setTextColor(Color.BLACK)
-            setHintTextColor(Color.GRAY)
+            setTextColor(textColor)
+            setHintTextColor(hintColor)
         }
         val pinInput = EditText(this).apply { 
             hint = "Set PIN (4-digit)"
-            setTextColor(Color.BLACK)
-            setHintTextColor(Color.GRAY)
+            setTextColor(textColor)
+            setHintTextColor(hintColor)
             inputType = android.text.InputType.TYPE_CLASS_NUMBER or android.text.InputType.TYPE_NUMBER_VARIATION_PASSWORD
         }
         

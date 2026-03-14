@@ -2,8 +2,9 @@ package attendance.ayush
 
 object TeacherRepository {
     private val _teachers = mutableListOf(
-        Teacher("0", "Principal", "0000", isPrincipal = true),
-        Teacher("1", "Teacher", "1111"),
+        Teacher("0", "Manager", "0000", isManager = true),
+        Teacher("1", "Principal", "1111"),
+        Teacher("2", "Teacher", "2222"),
     )
 
     val teachers: List<Teacher> get() = _teachers
